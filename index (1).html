@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LIBRA_P2P_COMMS - Chat Room</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+    <style>
+        :root { --neon: #00FF00; --glow: rgba(0, 255, 0, 0.3); }
+        body { background-color: black; color: var(--neon); font-family: 'Courier New', monospace; margin: 0; }
+        
+        #gate-screen {
+            position: fixed; inset: 0; background: black; z-index: 1000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        #main-interface { display: none; height: 100vh; padding: 20px; }
+        
+        .mode-box {
+            border: 1px solid var(--neon);
+            padding: 30px; margin: 10px; width: 300px; text-align: center;
+        }
+        .mode-container {
+            display: flex; justify-content: center; gap: 40px; flex-wrap: wrap;
+        }
+        input, button, textarea {
+            background: #000; border: 1px solid var(--neon); color: var(--neon);
+            padding: 10px; margin-top: 5px; width: 100%; box-sizing: border-box;
+            font-family: 'Courier New', monospace;
+        }
+        button:hover { background: var(--neon); color: black; cursor: pointer; }
+
+        #chat-room {
+            max-width: 900px; margin: 0 auto; display: flex; flex-direction: column;
+            height: 80vh; border: 2px solid var(--neon); border-radius: 10px;
+            background: rgba(0, 40, 0, 0.3); box-shadow: 0 0 30px var(--glow);
+        }
+        #messages { flex-grow: 1; overflow-y: auto; padding: 15px; border-bottom: 2px solid var(--neon); }
+        #messages p { margin: 5px 0; }
+        #messages p.you { color: #00ff00; font-weight: bold; }
+        #messages p.other { color: #66ff66; }
+        
+        #input-area { display: flex; gap: 10px; padding: 10px; }
+        #input-area textarea { flex-grow: 1; resize: none; height: 60px; }
+        #room-info { margin-bottom: 10px; text-align: center; font-size: 14px; color: var(--neon); display:flex; gap:10px; justify-content:center; align-items:center;}
+        #participants { font-size: 13px; color: var(--neon); text-align: center; margin-top:8px; }
+        .small { font-size: 12px; color: #999; }
+    </style>
+</head>
+<body>
+
+    <div id="gate-screen">
+        <h1 style="letter-spacing: 10px;">LIBRA_COMMAND_CENTER</h1>
+        <div class="mode-container">
+            <div class="mode-box">
+                <h3>ADMIN (DEMO)</h3>
+                <input type="password" id="admin-pass" placeholder="ENTER ADMIN PASS (DEMO ONLY)" />
+                <button id="admin-login-btn">CREATE ROOM (DEMO)</button>
+                <p class="small">Warning: client-side pass is visible to anyone who views source. For real security, authenticate on a server and issue short-lived tokens.</p>
+            </div>
+            <div class="mode-box">
+                <h3>PARTICIPANT</h3>
+                <input type="text" id="room-input" placeholder="PASTE ROOM CODE" />
+                <button id="enter-room-btn">ENTER ROOM</button>
+                <p class="small">Enter the admin's room code exactly (case-insensitive).</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-interface">
+        <div id="room-info">Room ID: <b id="room-display">...</b> <button id="copy-room">COPY</button></div>
+        <div id="participants">Participants: <span id="participant-list">—</span></div>
+        <div id="chat-room">
+            <div id="messages"></div>
+            <div id="input-area">
+                <textarea id="message-input" placeholder="Type your message here..."></textarea>
+                <button id="send-btn">SEND</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // Simple P2P chat using PeerJS
+    // IMPORTANT SECURITY NOTE:
+    // - This file demonstrates a client-only approach. Any "admin pass" checked here is visible to anyone.
+    // - For production, implement server-side authentication and issue signed, short-lived tokens for admins and participants.
+    // - Also consider configuring a dedicated PeerServer (self-hosted or authenticated) instead of the default PeerJS cloud.
+
+    let myPeer = null;
+    let connections = []; // PeerJS DataConnection objects
+    let isAdmin = false;
+    let roomId = null;
+    let participantIds = new Set();
+
+    const adminLoginBtn = document.getElementById('admin-login-btn');
+    const enterRoomBtn = document.getElementById('enter-room-btn');
+    const sendBtn = document.getElementById('send-btn');
+    const copyRoomBtn = document.getElementById('copy-room');
+
+    adminLoginBtn.addEventListener('click', enterAdmin);
+    enterRoomBtn.addEventListener('click', enterUser);
+    sendBtn.addEventListener('click', sendMessage);
+    copyRoomBtn.addEventListener('click', () => {
+        navigator.clipboard?.writeText(roomId || '').then(()=> {
+            alert('Room code copied to clipboard');
+        }, () => {
+            alert('Could not copy room code');
+        });
+    });
+
+    // Use Web Crypto to create a short random room code (6 chars chosen from A-Z0-9)
+    function generateRoomCode(length = 6) {
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        const arr = new Uint8Array(length);
+        crypto.getRandomValues(arr);
+        return Array.from(arr, v => alphabet[v % alphabet.length]).join('');
+    }
+
+    function enterAdmin() {
+        // DEMO only: client-side "pass" check. Remove for production.
+        const pass = document.getElementById('admin-pass').value;
+        if (!pass) {
+            alert('Enter a pass (demo)');
+            return;
+        }
+        // NOTE: This check is purely local — replace with server-side validation in production
+        isAdmin = true;
+        roomId = generateRoomCode();
+        console.log("Admin Room Code:", roomId);
+        startRoom(roomId, null);
+    }
+
+    function enterUser() {
+        const code = document.getElementById('room-input').value.toUpperCase().trim();
+        if (!code) {
+            alert('Please paste a room code.');
+            return;
+        }
+        isAdmin = false;
+        roomId = code;
+        startRoom(null, code);
+    }
+
+    function startRoom(generatedId, joinId) {
+        document.getElementById('gate-screen').style.display = 'none';
+        document.getElementById('main-interface').style.display = 'block';
+        document.getElementById('room-display').innerText = generatedId || joinId || '...';
+        document.getElementById('participant-list').innerText = '—';
+
+        // Initialize Peer.
+        // If you have your own PeerServer, pass options: new Peer(id, {host:'your-host', port:443, secure:true, path:'/myapp'})
+        myPeer = joinId ? new Peer() : new Peer(generatedId);
+
+        myPeer.on('open', (id) => {
+            console.log('Peer active with ID:', id);
+            writeSystemMessage(`Local peer ready: ${id}`);
+            if (joinId) {
+                // Connect to admin
+                connectToAdmin(joinId);
+            } else {
+                // Admin has their own code and waits for incoming connections
+                // Optionally show your own id in the participants list
+                participantIds.add(id);
+                updateParticipantList();
+            }
+        });
+
+        myPeer.on('connection', conn => {
+            // Someone connected to us (only relevant for admin)
+            console.log('Incoming connection from', conn.peer);
+            connections.push(conn);
+            addConnectionEvents(conn);
+
+            // Wait for connection to open before sending welcome
+            conn.on('open', () => {
+                writeSystemMessage(`Participant connected: ${conn.peer}`);
+                participantIds.add(conn.peer);
+                updateParticipantList();
+                if (isAdmin) {
+                    conn.send(JSON.stringify({ type: 'system', sender: 'System', text: `Welcome to room ${roomId}` }));
+                }
+            });
+        });
+
+        myPeer.on('error', err => {
+            console.error('PeerJS Error:', err);
+            writeSystemMessage('Connection Error: ' + (err && err.message ? err.message : String(err)));
+        });
+
+        myPeer.on('disconnected', () => {
+            writeSystemMessage('Peer disconnected. Attempting reconnect...');
+        });
+
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+            try { if (myPeer && !myPeer.destroyed) myPeer.destroy(); } catch (e) {}
+        });
+    }
+
+    function connectToAdmin(adminId) {
+        const conn = myPeer.connect(adminId, { reliable: true });
+        connections.push(conn);
+        addConnectionEvents(conn);
+
+        conn.on('open', () => {
+            // Identify ourselves to admin (optional)
+            try {
+                conn.send(JSON.stringify({ type: 'system', sender: 'System', text: `${myPeer.id} joined` }));
+            } catch (e) {
+                console.warn('Could not send join message', e);
+            }
+        });
+
+        conn.on('error', err => {
+            console.error('Connection error to admin:', err);
+            writeSystemMessage('Failed to connect to admin: ' + (err && err.message ? err.message : String(err)));
+        });
+    }
+
+    function addConnectionEvents(conn) {
+        conn.on('data', data => {
+            // Always handle data safely — incoming data could be anything.
+            let msgObj = null;
+            try {
+                if (typeof data === 'string') {
+                    msgObj = JSON.parse(data);
+                } else {
+                    msgObj = data;
+                }
+            } catch (e) {
+                // Not JSON; treat as plain text
+                writeMessage('Unknown', String(data));
+                return;
+            }
+
+            // Minimal, robust validation of expected structure
+            if (!msgObj || typeof msgObj !== 'object' || typeof msgObj.text !== 'string') {
+                writeMessage('Unknown', JSON.stringify(msgObj));
+                return;
+            }
+
+            // Write locally
+            const senderLabel = msgObj.sender || 'Unknown';
+            writeMessage(senderLabel, msgObj.text);
+
+            // If we're admin, optionally relay participant messages to other participants
+            if (isAdmin && conn.peer) {
+                // Only relay user messages (not system)
+                if (!msgObj.type || msgObj.type === 'chat') {
+                    relayToOthers(conn, msgObj);
+                }
+            }
+        });
+
+        conn.on('close', () => {
+            writeSystemMessage(`Participant disconnected: ${conn.peer}`);
+            connections = connections.filter(c => c !== conn);
+            participantIds.delete(conn.peer);
+            updateParticipantList();
+        });
+
+        conn.on('error', (err) => {
+            console.warn('Connection error with', conn.peer, err);
+        });
+    }
+
+    // Admin relays a message to all other participants (exclude sender)
+    function relayToOthers(senderConn, msgObj) {
+        connections.forEach(c => {
+            if (c.open && c !== senderConn) {
+                try {
+                    c.send(JSON.stringify(msgObj));
+                } catch (e) {
+                    console.warn('Failed to relay to', c.peer, e);
+                }
+            }
+        });
+    }
+
+    function sendMessage() {
+        const input = document.getElementById('message-input');
+        const txt = input.value.trim();
+        if (!txt) return;
+
+        // Local echo
+        writeMessage('You', txt);
+
+        // Construct message (type chat by default)
+        const msgObj = { type: 'chat', sender: isAdmin ? 'Admin' : 'User', text: txt, ts: Date.now() };
+
+        // Send to all open connections
+        connections.forEach(conn => {
+            if (conn.open) {
+                try {
+                    conn.send(JSON.stringify(msgObj));
+                } catch (e) {
+                    console.warn('Send failed to', conn.peer, e);
+                }
+            }
+        });
+
+        // If participant and no connections (not connected yet), warn user
+        if (!isAdmin && connections.length === 0) {
+            writeSystemMessage('Not connected to admin. Message not delivered.');
+        }
+
+        input.value = '';
+    }
+
+    // DOM helpers
+    function writeMessage(sender, text) {
+        const messages = document.getElementById('messages');
+        const p = document.createElement('p');
+
+        const bold = document.createElement('b');
+        bold.textContent = sender + ": ";
+
+        const content = document.createTextNode(text);
+
+        if (sender === 'You') {
+            p.className = 'you';
+        } else if (sender === 'Admin' || sender === 'User') {
+            p.className = 'other';
+        } else {
+            p.style.color = '#888';
+            p.style.fontStyle = 'italic';
+        }
+
+        p.appendChild(bold);
+        p.appendChild(content);
+        messages.appendChild(p);
+        messages.scrollTop =
